@@ -1,0 +1,5 @@
+[main]
+dburl = "mongodb://localhost:27017/"
+dbname = "analytics"
+secretkey = "Incremental Game"
+expiry = 3600

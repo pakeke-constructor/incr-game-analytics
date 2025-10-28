@@ -1,0 +1,6 @@
+fastapi
+itsdangerous
+pydantic
+pydantic-settings
+pymongo
+uvicorn

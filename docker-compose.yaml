@@ -1,0 +1,27 @@
+services:
+  mongodb:
+    # It's unfortunate that MongoDB doesn't have Alpine Linux docker
+    # https://www.mongodb.com/community/forums/t/why-is-there-no-mongodb-alpine-image/199185
+    image: mongo:8
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USERNAME:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD:-root}
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh --quiet
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 10s
+
+  analytics:
+    build: .
+    environment:
+      MAIN_DBURL: mongodb://${MONGODB_USERNAME:-root}:${MONGODB_PASSWORD:-root}@mongodb
+      MAIN_DBNAME: ${MONGODB_DATABASE:-analytics}
+      MAIN_SECRETKEY: ${SECRET_KEY:-Incremental Game}
+      MAIN_EXPIRY: ${TOKEN_EXPIRY:-3600}
+    ports:
+      - ${SERVER_BIND:-127.0.0.1:8000}:8000
+    depends_on:
+      mongodb:
+        condition: service_healthy
