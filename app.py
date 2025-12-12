@@ -1,3 +1,5 @@
+import base64
+import binascii
 import contextlib
 import struct
 import uuid
@@ -11,42 +13,17 @@ import pymongo.asynchronous.collection
 
 import b64pickle
 
-from typing import Annotated, Literal, TypedDict, cast
-
-
-def _empty_list_is_empty_dict(value):
-    if isinstance(value, list) and len(value) == 0:
-        return {}
-    return value
-
-
-EmptyListIsDict = pydantic.BeforeValidator(_empty_list_is_empty_dict)
-
-
-#################################
-### Begin of configurable things.
-#################################
-
-
-# If the save schema changes, modify this.
-class SaveData(TypedDict):
-    resources: Annotated[dict[str, float], EmptyListIsDict]
-    prestige: int
-    playtime: float
-    idletime: float
-    prestigeLevels: list[int]
-    stats: Annotated[dict[str, int | float], EmptyListIsDict]
-    metrics: Annotated[dict[str, int | float], EmptyListIsDict]
-    upgradeLevels: Annotated[dict[str, int], EmptyListIsDict]
+from typing import Annotated, Any, Literal, TypedDict, cast
 
 
 ###################################################################
-### End of configurable things. Stuff below is core inner workings.
+### Stuff below is core inner workings.
 ###################################################################
 
 
 class Config(pydantic_settings.BaseSettings):
     class Main(pydantic.BaseModel):
+        production: bool = False
         dburl: pydantic.SecretStr = pydantic.SecretStr("mongodb://localhost:27017/")
         dbname: str = "analytics"
         secretkey: pydantic.SecretStr = pydantic.SecretStr("Incremental Game")
@@ -95,13 +72,16 @@ class BaseResponse(pydantic.BaseModel):
 
 class AuthRequest(pydantic.BaseModel):
     steam_id: str
-    random_value: pydantic.Base64Bytes
+    # Note:
+    random_value: Annotated[str, pydantic.Field(description="32-byte random data by client, base64-encoded")]
+    """This is base64, but we cannot use pydantic.Base64Bytes due to FastAPI bug."""
     os: str
     os_version: str
 
 
 class AuthResponse(BaseResponse):
     token: str
+    expire: int
 
 
 SendEventType = Literal[
@@ -115,7 +95,7 @@ class SendData(TypedDict):
     timestamp: int  # time it was collected
     game_version: int
     scene: str
-    save: SaveData
+    save: dict[str, Any]
 
 
 class SendDataWithID(SendData):
@@ -159,7 +139,10 @@ async def mongodb_dependency():
 
 
 async def get_token_data(encoded: Annotated[str, fastapi.Header(alias="X-Session-Token")]):
-    return TokenData.decapsulate(encoded)
+    try:
+        return TokenData.decapsulate(encoded)
+    except itsdangerous.BadSignature as e:
+        raise fastapi.HTTPException(401, "Invalid token") from e
 
 
 @contextlib.asynccontextmanager
@@ -190,7 +173,12 @@ async def lifetime(app: fastapi.FastAPI):
     mongo_client = None
 
 
-app = fastapi.FastAPI(title="Another Analytics", lifespan=lifetime)
+_args = {}
+if config.main.production:
+    _args["openapi_url"] = None
+    _args["docs_url"] = None
+    _args["redoc_url"] = None
+app = fastapi.FastAPI(title="Another Analytics", lifespan=lifetime, **_args)
 
 #####################
 ### FastAPI endpoints
@@ -201,13 +189,19 @@ app = fastapi.FastAPI(title="Another Analytics", lifespan=lifetime)
 async def auth(request: AuthRequest, response: fastapi.Response) -> BaseResponse | AuthResponse:
     # TODO: Check if steam ID is valid and sane
 
-    if not request.steam_id.isdigit() or len(request.steam_id) > 25 or len(request.random_value) != 32:
+    try:
+        random_value = base64.b64decode(request.random_value)
+    except ValueError:
+        response.status_code = 400
+        return BaseResponse(message="Invalid parameter")
+
+    if not request.steam_id.isdigit() or len(request.steam_id) > 25 or len(random_value) != 32:
         response.status_code = 400
         return BaseResponse(message="Invalid parameter")
 
     steamid = int(request.steam_id)
-    token = TokenData(steam_id=steamid, uuid=uuid_from_steamid_and_value(steamid, request.random_value))
-    return AuthResponse(message="Ok", token=token.encapsulate())
+    token = TokenData(steam_id=steamid, uuid=uuid_from_steamid_and_value(steamid, random_value))
+    return AuthResponse(message="Ok", token=token.encapsulate(), expire=config.main.expiry)
 
 
 @app.post("/send", status_code=200)

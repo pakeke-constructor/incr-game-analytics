@@ -1,4 +1,5 @@
 [main]
+production = false
 dburl = "mongodb://localhost:27017/"
 dbname = "analytics"
 secretkey = "Incremental Game"

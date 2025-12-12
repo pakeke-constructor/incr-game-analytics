@@ -11,4 +11,5 @@ COPY . .
 
 EXPOSE 8000/tcp
 
+ENV MAIN_PRODUCTION=1
 ENTRYPOINT ["python", "-m", "uvicorn", "--host", "0.0.0.0", "app:app"]
