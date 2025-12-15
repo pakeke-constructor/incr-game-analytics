@@ -1,6 +1,6 @@
 import base64
-import binascii
 import contextlib
+import datetime
 import struct
 import uuid
 
@@ -92,7 +92,7 @@ SendEventType = Literal[
 class SendData(TypedDict):
     event: SendEventType
     playtime: int  # how much playtime has there been
-    timestamp: int  # time it was collected
+    timestamp: datetime.datetime  # time it was collected (pydantic will do conversion)
     game_version: int
     scene: str
     save: dict[str, Any]
@@ -120,7 +120,6 @@ secret_serializer = itsdangerous.timed.TimedSerializer[str](
     config.main.secretkey.get_secret_value().encode("utf-8"), serializer=b64pickle
 )
 mongo_client: pymongo.AsyncMongoClient[SendDataWithID] | None = None
-print(config)
 
 
 async def mongodb_dependency():
@@ -143,15 +142,6 @@ async def get_token_data(encoded: Annotated[str, fastapi.Header(alias="X-Session
         return TokenData.decapsulate(encoded)
     except itsdangerous.BadSignature as e:
         raise fastapi.HTTPException(401, "Invalid token") from e
-
-
-@contextlib.asynccontextmanager
-async def begin_transaction():
-    if mongo_client is None:
-        raise RuntimeError("mongodb is None")
-
-    async with mongo_client.start_session() as session, await session.start_transaction():
-        yield session
 
 
 NeedMongoDB = Annotated[
@@ -206,10 +196,10 @@ async def auth(request: AuthRequest, response: fastapi.Response) -> BaseResponse
 
 @app.post("/send", status_code=200)
 async def send(request: list[SendData], token: NeedTokenData, db: NeedMongoDB) -> BaseResponse:
-    async with begin_transaction() as sess:
-        for send_data in request:
-            send_data_with_id = cast(SendDataWithID, send_data)
-            send_data_with_id["player_id"] = str(token.uuid)
-            await db.insert_one(send_data_with_id, session=sess)
+    # MongoDB lacked transaction. How unfortunate.
+    for send_data in request:
+        send_data_with_id = cast(SendDataWithID, send_data)
+        send_data_with_id["player_id"] = str(token.uuid)
+        await db.insert_one(send_data_with_id)
 
     return BaseResponse(message="Ok")
