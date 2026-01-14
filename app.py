@@ -1,15 +1,16 @@
 import base64
-import contextlib
-import datetime
+import json
+import pathlib
 import struct
+import time
+import traceback
 import uuid
 
+import aiofiles
 import fastapi
 import itsdangerous.timed
 import pydantic
 import pydantic_settings
-import pymongo
-import pymongo.asynchronous.collection
 
 import b64pickle
 
@@ -20,11 +21,15 @@ from typing import Annotated, Any, Literal, TypedDict, cast
 ### Stuff below is core inner workings.
 ###################################################################
 
+ROOT_DIR = pathlib.Path(__file__).parent.resolve()
+
 
 class Config(pydantic_settings.BaseSettings):
     class Main(pydantic.BaseModel):
         production: bool = False
-        dburl: pydantic.SecretStr = pydantic.SecretStr("mongodb://localhost:27017/")
+        datadir: Annotated[pathlib.Path, pydantic.AfterValidator(lambda x: ROOT_DIR / x)] = pathlib.Path(
+            ROOT_DIR, "data"
+        )
         dbname: str = "analytics"
         secretkey: pydantic.SecretStr = pydantic.SecretStr("Incremental Game")
         expiry: int = 3600
@@ -92,7 +97,7 @@ SendEventType = Literal[
 class SendData(TypedDict):
     event: SendEventType
     playtime: int  # how much playtime has there been
-    timestamp: datetime.datetime  # time it was collected (pydantic will do conversion)
+    timestamp: int
     game_version: int
     scene: str
     save: dict[str, Any]
@@ -119,22 +124,8 @@ config = Config.model_validate({})
 secret_serializer = itsdangerous.timed.TimedSerializer[str](
     config.main.secretkey.get_secret_value().encode("utf-8"), serializer=b64pickle
 )
-mongo_client: pymongo.AsyncMongoClient[SendDataWithID] | None = None
 
-
-async def mongodb_dependency():
-    if mongo_client is None:
-        raise RuntimeError("mongodb is None")
-
-    await mongo_client.aconnect()
-    db = mongo_client[config.main.dbname]
-
-    if COLLECTION_NAME not in await db.list_collection_names():
-        col = await db.create_collection(COLLECTION_NAME, timeseries={"timeField": "timestamp"})
-    else:
-        col = db.get_collection(COLLECTION_NAME)
-
-    yield col
+config.main.datadir.mkdir(parents=True, exist_ok=True)
 
 
 async def get_token_data(encoded: Annotated[str, fastapi.Header(alias="X-Session-Token")]):
@@ -144,31 +135,25 @@ async def get_token_data(encoded: Annotated[str, fastapi.Header(alias="X-Session
         raise fastapi.HTTPException(401, "Invalid token") from e
 
 
-NeedMongoDB = Annotated[
-    pymongo.asynchronous.collection.AsyncCollection[SendDataWithID], fastapi.Depends(mongodb_dependency)
-]
+async def write_data(data: SendDataWithID):
+    path = config.main.datadir / f"{time.time_ns()}_{data['player_id']}.json"
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        result = json.dumps(data, separators=(",", ":"))
+        await f.write(result)
+
+
 NeedTokenData = Annotated[TokenData, fastapi.Depends(get_token_data)]
 
 ##########################
 ### FastAPI app definition
 ##########################
 
-
-@contextlib.asynccontextmanager
-async def lifetime(app: fastapi.FastAPI):
-    global mongo_client
-    async with pymongo.AsyncMongoClient(config.main.dburl.get_secret_value()) as client:
-        mongo_client = client
-        yield
-    mongo_client = None
-
-
 _args = {}
 if config.main.production:
     _args["openapi_url"] = None
     _args["docs_url"] = None
     _args["redoc_url"] = None
-app = fastapi.FastAPI(title="Another Analytics", lifespan=lifetime, **_args)
+app = fastapi.FastAPI(title="Another Analytics", **_args)
 
 #####################
 ### FastAPI endpoints
@@ -195,11 +180,14 @@ async def auth(request: AuthRequest, response: fastapi.Response) -> BaseResponse
 
 
 @app.post("/send", status_code=200)
-async def send(request: list[SendData], token: NeedTokenData, db: NeedMongoDB) -> BaseResponse:
-    # MongoDB lacked transaction. How unfortunate.
+async def send(request: list[SendData], token: NeedTokenData) -> BaseResponse:
     for send_data in request:
         send_data_with_id = cast(SendDataWithID, send_data)
         send_data_with_id["player_id"] = str(token.uuid)
-        await db.insert_one(send_data_with_id)
+
+        try:
+            await write_data(send_data_with_id)
+        except Exception as e:
+            traceback.print_exception(e)
 
     return BaseResponse(message="Ok")

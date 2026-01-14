@@ -10,6 +10,7 @@ WORKDIR /app
 COPY . .
 
 EXPOSE 8000/tcp
+VOLUME /app/data
 
 ENV MAIN_PRODUCTION=1
 ENTRYPOINT ["python", "-m", "uvicorn", "--host", "0.0.0.0", "app:app"]

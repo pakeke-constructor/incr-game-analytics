@@ -1,6 +1,6 @@
 [main]
 production = false
-dburl = "mongodb://localhost:27017/"
+datadir = "data"
 dbname = "analytics"
 secretkey = "Incremental Game"
 expiry = 3600
